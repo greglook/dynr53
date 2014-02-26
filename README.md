@@ -1,4 +1,4 @@
-dynr53
+Dynr53
 ======
 
 This is a ruby script to update AWS Route53 with records based on the current
