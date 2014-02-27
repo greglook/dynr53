@@ -17,6 +17,8 @@ require 'aws-sdk-core'
 require 'system/getifaddrs'
 
 
+##### CONFIGURATION #####
+
 $hosted_zone = nil
 $domain_name = %x{hostname --fqdn}.strip
 $ipv4 = []
@@ -80,6 +82,9 @@ System.get_all_ifaddrs.each do |info|
     puts "IPv6 #{interface} #{address}"
   end
 end
+
+
+##### ROUTE UPDATING #####
 
 #route53 = Aws::Route53.new()
 
