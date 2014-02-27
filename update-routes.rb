@@ -21,16 +21,18 @@ require 'system/getifaddrs'
 
 $hosted_zone = nil
 $domain_name = %x{hostname --fqdn}.strip
-$ipv4 = []
-$ipv6 = []
+$ipv4_interfaces = []
+$ipv6_interfaces = []
+$ttl = 300
 
 # Parse command-line options.
 options = OptionParser.new do |opts|
-  opts.banner = "Usage: #{File.basename($0)} [options] <hosted zone id>"
+  opts.banner = "Usage: #{File.basename($0)} [options] <interfaces> <hosted zone id>"
+  opts.on('-4', '--ipv4 IFACE',    "Updates A records for the IPv4 address on an interface") {|iface| $ipv4_interfaces << iface }
+  opts.on('-6', '--ipv6 IFACE',    "Updates AAAA records for global IPv6 addresses on an interface") {|iface| $ipv6_interfaces << iface }
   opts.on('-f', '--fqdn HOSTNAME', "Sets the fully-qualified domain name to update (default: #{$domain_name})") {|n| $domain_name = n }
-  opts.on('-4', '--ipv4 IFACE', "Updates A records for the IPv4 address on an interface") {|iface| $ipv4 << iface }
-  opts.on('-6', '--ipv6 IFACE', "Updates AAAA records for global IPv6 addresses on an interface") {|iface| $ipv6 << iface }
-  opts.on('-h', '--help', "Displays usage information") { print opts; exit }
+  opts.on('-t', '--ttl SECONDS',   "Sets the time-to-live of the updated records (default: #{$ttl})") {|t| $ttl = t.to_i }
+  opts.on('-h', '--help',          "Displays usage information") { print opts; exit }
 end
 options.parse!
 
@@ -41,6 +43,10 @@ end
 
 fail options if ARGV.empty?
 $hosted_zone = ARGV.shift
+
+fail "Must specify at least one interface to check using --ipv4 or --ipv6" if $ipv4_interfaces.empty? && $ipv6_interfaces.empty?
+
+$domain_name << '.'
 
 
 ##### IP ADDRESS DISCOVERY #####
@@ -67,31 +73,105 @@ def global_ipv6?(address)
     !IPV6_LINK_LOCAL.include?(address)
 end
 
-$addresses = {}
+$ipv4_addresses = []
+$ipv6_addresses = []
 
+puts "Discovering global IP addresses..."
 System.get_all_ifaddrs.each do |info|
   interface = info[:interface]
   address = info[:inet_addr]
-  netmask = info[:netmask]
 
-  if $ipv4.include?(interface) && global_ipv4?(address)
-    # TODO: handle IPv4 address
-    puts "IPv4 #{interface} #{address}"
-  elsif $ipv6.include?(interface) && global_ipv6?(address)
-    # TODO: handle IPv6 address
-    puts "IPv6 #{interface} #{address}"
+  if $ipv4_interfaces.include?(interface) && global_ipv4?(address)
+    puts "    #{interface}: #{address}"
+    $ipv4_addresses << address
+  elsif $ipv6_interfaces.include?(interface) && global_ipv6?(address)
+    puts "    #{interface}: #{address}"
+    $ipv6_addresses << address
   end
 end
+
+$ipv4_addresses.sort!
+$ipv6_addresses.sort!
+puts
 
 
 ##### ROUTE UPDATING #####
 
-#route53 = Aws::Route53.new()
+puts "Connecting to AWS Route53 service..."
+$route53 = Aws::Route53.new(region: 'us-west-2')
 
-# Query R53 for existing records
-#response = route53.list_resource_record_sets(hosted_zone_id: $hosted_zone)
-#resp.resource_record_sets
+puts "Querying Route53 for resource record sets for #{$domain_name}.."
+response = $route53.list_resource_record_sets(hosted_zone_id: $hosted_zone, start_record_name: $domain_name)
 
-# Update R53 if necessary.
+record_sets = response.resource_record_sets.reject {|set| set.name != $domain_name }
+ipv4_record = nil
+ipv6_record = nil
+
+record_sets.each do |set|
+  if set.type == 'A'
+    ipv4_record = set.resource_records.map{|v| IPAddr.new(v.value) }.sort
+    puts "     A record: #{ipv4_record.join(', ')} (ttl #{set.ttl})"
+  elsif set.type == 'AAAA'
+    ipv6_record = set.resource_records.map{|v| IPAddr.new(v.value) }.sort
+    puts "     AAAA record: #{ipv6_record.join(', ')} (ttl #{set.ttl})"
+  end
+end
+puts
+
+ipv4_update_needed = ipv4_record ? (ipv4_record != $ipv4_addresses) : !$ipv4_addresses.empty?
+ipv6_update_needed = ipv6_record ? (ipv6_record != $ipv6_addresses) : !$ipv6_addresses.empty?
+
+$updates = []
+
+def upsert_record(type, addresses)
+  puts "#{type} record needs updating => #{addresses.join(', ')}"
+
+  $updates << {
+    action: 'UPSERT',
+    resource_record_set: {
+      name: $domain_name,
+      type: type,
+      ttl: $ttl,
+      resource_records: addresses.map do |addr|
+        {value: addr.to_s}
+      end
+    }
+  }
+end
+
+upsert_record('A',    $ipv4_addresses) if ipv4_update_needed
+upsert_record('AAAA', $ipv6_addresses) if ipv6_update_needed
+
+if $updates.empty?
+  puts "No updates required"
+  exit
+end
+puts
+
+puts "Applying updates to Route53..."
+request = {
+  hosted_zone_id: $hosted_zone,
+  change_batch: {
+    comment: "Dynr53 automatic update",
+    changes: $updates
+  }
+}
+
+response = $route53.change_resource_record_sets(request)
+
+change_id = response.change_info.id.split('/')[2]
+status = response.change_info.status
+puts "Created change #{change_id} (#{response.change_info.status})"
 
 # Wait for any changes to succeed.
+max_retries = 10
+attempt = 0
+while status == 'PENDING' && attempt < max_retries
+  attempt += 1
+  sleep 5
+  response = $route53.get_change(id: change_id)
+  status = response.change_info.status
+  puts "  ...#{status}"
+end
+
+fail "Gave up after #{attempt} attempts" if status != 'INSYNC'
