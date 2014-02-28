@@ -20,9 +20,10 @@ require 'system/getifaddrs'
 ##### CONFIGURATION #####
 
 $hosted_zone = nil
-$domain_name = %x{hostname --fqdn}.strip
 $ipv4_interfaces = []
 $ipv6_interfaces = []
+$domain_name = %x{hostname --fqdn}.strip
+$create_records = true
 $ttl = 300
 
 # Parse command-line options.
@@ -32,6 +33,7 @@ options = OptionParser.new do |opts|
   opts.on('-6', '--ipv6 IFACE',    "Updates AAAA records for global IPv6 addresses on an interface") {|iface| $ipv6_interfaces << iface }
   opts.on('-f', '--fqdn HOSTNAME', "Sets the fully-qualified domain name to update (default: #{$domain_name})") {|n| $domain_name = n }
   opts.on('-t', '--ttl SECONDS',   "Sets the time-to-live of the updated records (default: #{$ttl})") {|t| $ttl = t.to_i }
+  opts.on('-c', '--[no-]create',   "Create DNS records if they do not exist (default: #{$create_records})") {|v| $create_records = v }
   opts.on('-h', '--help',          "Displays usage information") { print opts; exit }
 end
 options.parse!
@@ -92,39 +94,55 @@ end
 
 $ipv4_addresses.sort!
 $ipv6_addresses.sort!
-puts
 
 
-##### ROUTE UPDATING #####
+##### RECORD QUERYING #####
 
-puts "Connecting to AWS Route53 service..."
+puts "\nConnecting to AWS Route53 service..."
 $route53 = Aws::Route53.new(region: 'us-west-2')
 
 puts "Querying Route53 for resource record sets for #{$domain_name}.."
 response = $route53.list_resource_record_sets(hosted_zone_id: $hosted_zone, start_record_name: $domain_name)
 
 record_sets = response.resource_record_sets.reject {|set| set.name != $domain_name }
-ipv4_record = nil
-ipv6_record = nil
+$ipv4_record = nil
+$ipv6_record = nil
 
 record_sets.each do |set|
   if set.type == 'A'
-    ipv4_record = set.resource_records.map{|v| IPAddr.new(v.value) }.sort
-    puts "     A record: #{ipv4_record.join(', ')} (ttl #{set.ttl})"
+    $ipv4_record = set.resource_records.map{|v| IPAddr.new(v.value) }.sort
+    puts "     A record: #{$ipv4_record.join(', ')} (ttl #{set.ttl})"
   elsif set.type == 'AAAA'
-    ipv6_record = set.resource_records.map{|v| IPAddr.new(v.value) }.sort
-    puts "     AAAA record: #{ipv6_record.join(', ')} (ttl #{set.ttl})"
+    $ipv6_record = set.resource_records.map{|v| IPAddr.new(v.value) }.sort
+    puts "     AAAA record: #{$ipv6_record.join(', ')} (ttl #{set.ttl})"
   end
 end
-puts
 
-ipv4_update_needed = ipv4_record ? (ipv4_record != $ipv4_addresses) : !$ipv4_addresses.empty?
-ipv6_update_needed = ipv6_record ? (ipv6_record != $ipv6_addresses) : !$ipv6_addresses.empty?
+
+
+##### RECORD UPDATING #####
 
 $updates = []
 
-def upsert_record(type, addresses)
-  puts "#{type} record needs updating => #{addresses.join(', ')}"
+def update_record(type, record, addresses)
+  if record.nil?
+    # Nothing to do
+    return if addresses.empty?
+
+    # Needs creating.
+    if $create_records
+      puts "    #{type} record missing, creating => #{addresses.join(', ')}"
+    else
+      puts "    #{type} record missing, not creating"
+      return
+    end
+  else
+    # Nothing to do.
+    return if record == addresses
+
+    # Needs updating.
+    puts "    #{type} record needs updating => #{addresses.join(', ')}"
+  end
 
   $updates << {
     action: 'UPSERT',
@@ -139,16 +157,16 @@ def upsert_record(type, addresses)
   }
 end
 
-upsert_record('A',    $ipv4_addresses) if ipv4_update_needed
-upsert_record('AAAA', $ipv6_addresses) if ipv6_update_needed
+puts "\nDetermining action..."
+update_record('A',    $ipv4_record, $ipv4_addresses)
+update_record('AAAA', $ipv6_record, $ipv6_addresses)
 
 if $updates.empty?
-  puts "No updates required"
+  puts "    No updates required"
   exit
 end
-puts
 
-puts "Applying updates to Route53..."
+puts "\nApplying updates to Route53..."
 request = {
   hosted_zone_id: $hosted_zone,
   change_batch: {
@@ -161,17 +179,19 @@ response = $route53.change_resource_record_sets(request)
 
 change_id = response.change_info.id.split('/')[2]
 status = response.change_info.status
-puts "Created change #{change_id} (#{response.change_info.status})"
+puts "    Submitted change #{change_id} (#{response.change_info.status})"
 
 # Wait for any changes to succeed.
-max_retries = 10
+max_retries = 6
+retry_period = 10
+
 attempt = 0
 while status == 'PENDING' && attempt < max_retries
   attempt += 1
-  sleep 5
+  sleep retry_period
   response = $route53.get_change(id: change_id)
   status = response.change_info.status
-  puts "  ...#{status}"
+  puts "    %d: %s%s" % [attempt, status, status == 'PENDING' ? '...' : '']
 end
 
-fail "Gave up after #{attempt} attempts" if status != 'INSYNC'
+fail "Gave up after #{attempt * retry_period} seconds" if status != 'INSYNC'
