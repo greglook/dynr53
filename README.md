@@ -24,26 +24,32 @@ export AWS_SECRET_ACCESS_KEY=...
 
 The script accepts a number of options to control its behavior:
 
+* `-f` `--fqdn HOSTNAME`
+  Set the fully-qualified domain name to update records for. This defaults to
+  the output of `hostname --fqdn`.
 * `-4` `--ipv4 INTERFACE`
   Specify a network interface to check for public IPv4 addresses.
 * `-6` `--ipv6 INTERFACE`
   Specify a network interface to check for global IPv6 addresses.
-* `-f` `--fqdn`
-  Set the fully-qualified domain name to update records for. This defaults to
-  the output of `hostname --fqdn`.
-* `-t` `--ttl`
+* `-t` `--ttl SECONDS`
   Set the time-to-live of created records, in seconds.
 * `-c` `--[no-]create`
   Controls whether missing DNS records will be created or ignored.
+* `-w` `--[no-]wait`
+  Causes the script to wait for full change propagation before exiting.
 
 At least one network interface must be specified, and the id of the hosted zone
 to update must be given as the first non-option argument.
 
 ## Output
 
-The script reports what it's doing as it goes:
+By default, the script produces no output since it is intended to run as a cron
+job. However, with the `--verbose` option the script reports what it's doing as
+it goes:
 
 ```
+Dynr53 run 2014-03-02T19:35:02Z
+
 Discovering global IP addresses...
     wan0: 198.245.101.200
     br0: 2001:471:b:253::1
