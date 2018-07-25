@@ -162,8 +162,13 @@ def update_record(type, record, addresses)
     # Nothing to do.
     return if record == addresses
 
-    # Needs updating.
-    log "    #{type} record needs updating => #{addresses.join(', ')}"
+    if addresses.empty?
+      log "    #{type} record present but no addresses found! skipping"
+      return
+    else
+      # Needs updating.
+      log "    #{type} record needs updating => #{addresses.join(', ')}"
+    end
   end
 
   $updates << {
