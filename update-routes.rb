@@ -12,9 +12,9 @@
 
 require 'ipaddr'
 require 'optparse'
+require 'socket'
 
-require 'aws-sdk-core'
-require 'system/getifaddrs'
+require 'aws-sdk-route53'
 
 
 ##### CONFIGURATION #####
@@ -73,44 +73,37 @@ $domain_name << '.'
 log "Dynr53 run #{Time.now.strftime("%Y-%m-%dT%H:%M:%SZ")}"
 
 
+
 ##### IP ADDRESS DISCOVERY #####
-
-IPV4_PRIVATE_CLASS_A = IPAddr.new("10.0.0.0/8")
-IPV4_PRIVATE_CLASS_B = IPAddr.new("172.16.0.0/12")
-IPV4_PRIVATE_CLASS_C = IPAddr.new("192.168.0.0/16")
-
-IPV6_UNIQUE_LOCAL = IPAddr.new("fc00::/7")
-IPV6_SITE_LOCAL   = IPAddr.new("fec0::/16")
-IPV6_LINK_LOCAL   = IPAddr.new("fe80::/16")
 
 def global_ipv4?(address)
   address.ipv4? &&
-    !IPV4_PRIVATE_CLASS_A.include?(address) &&
-    !IPV4_PRIVATE_CLASS_B.include?(address) &&
-    !IPV4_PRIVATE_CLASS_C.include?(address)
+    !address.ipv4_loopback? &&
+    !address.ipv4_private?
 end
 
 def global_ipv6?(address)
   address.ipv6? &&
-    !IPV6_UNIQUE_LOCAL.include?(address) &&
-    !IPV6_SITE_LOCAL.include?(address) &&
-    !IPV6_LINK_LOCAL.include?(address)
+    !address.ipv6_loopback? &&
+    !address.ipv6_unique_local? &&
+    !address.ipv6_sitelocal? &&
+    !address.ipv6_linklocal?
 end
 
 $ipv4_addresses = []
 $ipv6_addresses = []
 
 log_header "Discovering global IP addresses..."
-System.get_all_ifaddrs.each do |info|
-  interface = info[:interface]
-  address = info[:inet_addr]
+Socket.getifaddrs.each do |ifaddr|
+  interface = ifaddr.name
+  address = ifaddr.addr
 
   if $ipv4_interfaces.include?(interface) && global_ipv4?(address)
-    log "    #{interface}: #{address}"
-    $ipv4_addresses << address
+    log "    #{interface}: #{address.ip_address}"
+    $ipv4_addresses << address.ip_address
   elsif $ipv6_interfaces.include?(interface) && global_ipv6?(address)
-    log "    #{interface}: #{address}"
-    $ipv6_addresses << address
+    log "    #{interface}: #{address.ip_address}"
+    $ipv6_addresses << address.ip_address
   end
 end
 
@@ -118,10 +111,11 @@ $ipv4_addresses.sort!
 $ipv6_addresses.sort!
 
 
+
 ##### RECORD QUERYING #####
 
 log_header "Connecting to AWS Route53 service..."
-$route53 = Aws::Route53.new(region: 'us-west-2')
+$route53 = Aws::Route53::Client.new(region: 'us-west-2')
 
 log "Querying Route53 for resource record sets for #{$domain_name}.."
 response = $route53.list_resource_record_sets(hosted_zone_id: $hosted_zone, start_record_name: $domain_name)
