@@ -1,4 +1,3 @@
 source "https://rubygems.org"
 
-gem 'aws-sdk-core'
-gem 'system-getifaddrs'
+gem 'aws-sdk-route53', '~> 1'
